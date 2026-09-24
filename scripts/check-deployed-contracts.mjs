@@ -40,9 +40,9 @@ const REPO_ROOT = join(__dirname, "..");
 
 const RPC_URL =
   process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  process.env.STELLAR_NETWORK_PASSPHRASE ??
-  "Test SDF Network ; September 2015";
+// STELLAR_NETWORK_PASSPHRASE is documented for completeness (it would be used
+// when wiring up a getLedgerEntries probe with the Stellar SDK), but is
+// intentionally NOT read into a variable here – it must never appear in logs.
 
 /** Contracts we care about, keyed by logical name. */
 const CONTRACT_ENV_MAP = {
@@ -67,26 +67,10 @@ function isValidContractId(id) {
  */
 async function probeContract(contractId) {
   try {
-    // Build a minimal JSON-RPC request for getLedgerEntries.
-    // We request the ContractData for the Wasm key (type=1 → CONTRACT_CODE).
-    // This does not require any SDK – it is plain HTTP.
-    const payload = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getLedgerEntries",
-      params: {
-        keys: [
-          // Base64-encoded XDR for LedgerKey of type ContractCode is complex to
-          // construct without the SDK. We use getContractData (deprecated but
-          // broadly supported) as a lighter probe: attempt to fetch the contract
-          // instance entry.
-          // Encoding: use Horizon's public ledger endpoint as a fallback.
-        ],
-      },
-    };
-
-    // Simpler probe: call the RPC health endpoint + getLatestLedger to verify
-    // connectivity, then use getContractData to verify the contract exists.
+    // Probe the RPC health endpoint to verify connectivity.
+    // A real deployment would follow this with a getLedgerEntries call
+    // (using the SDK to construct the required XDR key); for now a health
+    // check is sufficient to confirm the endpoint is reachable and serving.
     const healthRes = await fetch(`${RPC_URL}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -208,7 +192,8 @@ const SKIP_NETWORK = process.env.SKIP_NETWORK_PROBE === "true";
 if (SKIP_NETWORK) {
   warn("SKIP_NETWORK_PROBE=true – skipping live RPC probe");
 } else {
-  console.log(`  Probing RPC: ${RPC_URL} (${NETWORK_PASSPHRASE})`);
+  // Log only the RPC URL – never the network passphrase or any credential.
+  console.log(`  Probing RPC: ${RPC_URL}`);
   const probe = await probeContract("_health_only_");
   if (probe.exists) {
     pass(`RPC at ${RPC_URL} is reachable and healthy`);
