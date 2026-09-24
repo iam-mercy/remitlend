@@ -3,7 +3,8 @@
 This document describes the security model for the RemitLend backend API: how
 identities are established, how roles map to scopes, and which scope guard
 protects each route group. See also [SECURITY.md](../SECURITY.md) for the
-vulnerability-disclosure policy.
+vulnerability-disclosure policy and the [loan lifecycle threat
+model](./THREAT_MODEL_LOAN_LIFECYCLE.md).
 
 ---
 
