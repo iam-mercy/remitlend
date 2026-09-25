@@ -57,6 +57,10 @@ Available scopes: `admin:disputes`, `admin:indexer`, `admin:webhooks`,
 
 Implemented in `backend/src/middleware/auth.ts` (`requireApiKey`).
 
+For the assumptions and accepted limitations that surround this model (and the
+compensating controls for each), see
+[SECURITY-ASSUMPTIONS.md](SECURITY-ASSUMPTIONS.md).
+
 ---
 
 ## Role resolution
