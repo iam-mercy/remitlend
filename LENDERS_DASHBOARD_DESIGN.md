@@ -102,6 +102,66 @@ Integrated the **RemitLend Quests** sidebar to tie financial actions directly to
 
 ---
 
+## Pool Health & Risk Explanation Surfaces
+
+This section defines the frontend surfaces that communicate pool health and explain risk to lenders. All values are derived from authoritative sources — the pool API and on-chain governance data — never computed or guessed client-side.
+
+### Data Sources & Authority
+
+- **Pool health score, utilization, and risk tier** come from the pool API response (`GET /pools/:id/health`) and citadel governance data. The frontend renders these values verbatim; it does not recompute scores, utilization, or tiers.
+- **Risk explanations** are sourced from the API's `riskFactors[]` array (each with `code`, `severity`, `label`, `detail`). The UI maps known `code` values to display copy and falls back to the API-provided `label`/`detail` for unknown codes, so new backend factors render without a frontend release.
+- **Staleness** is determined from the API-provided `asOf` timestamp compared against the client clock; the UI never infers freshness from fetch time alone.
+
+### Pool Health Surface
+
+Displayed on each Prime Lending Pool card and in the pool detail view:
+
+- **Health score** — numeric score with a labeled band (Healthy / Watch / At Risk) derived from API-provided thresholds, not hardcoded cutoffs.
+- **Utilization bar** — percentage label rendered directly from the API value.
+- **Risk tier badge** — Low / Medium / High, colored per the palette (teal / amber / red).
+- **As-of timestamp** — shown next to the score so lenders can judge freshness.
+
+### Risk Explanation Surface
+
+A collapsible **"Why this risk level?"** panel on each pool card and detail view:
+
+- Lists each `riskFactor` with its severity indicator and human-readable explanation.
+- Groups factors by severity (High → Medium → Low) for quick scanning.
+- Shows an explicit empty state ("No active risk factors reported") when the API returns none.
+- Links each factor to its authoritative source label (e.g. governance, utilization, oracle) so lenders can trace the claim.
+
+### State Handling
+
+Every health/risk surface implements these explicit states:
+
+| State | Trigger | UI Behavior |
+|---|---|---|
+| Loading | Initial fetch in flight | Skeleton placeholders; no stale numbers shown |
+| Success | Fresh data (`asOf` within freshness window) | Render score, tier, and factors |
+| Stale | `asOf` older than freshness window | Render last-known values with a "Stale" badge and as-of time; disable deposit CTA until refreshed |
+| Authorization failure | 401/403 from API | Show "Sign in to view pool health" / "You don't have access to this pool"; do not render partial data |
+| Dependency failure | 5xx / network error | Show retry affordance with bounded exponential backoff; preserve last-known values marked stale |
+| Empty | Pool has no health data | Neutral "Health data unavailable" state; never fabricate a score |
+
+### Validation & Bounded Behavior
+
+- Health/risk payloads are validated against the expected shape before render; malformed payloads fall back to the dependency-failure state rather than rendering partial or NaN values.
+- Retries use bounded exponential backoff with a maximum attempt count; after exhaustion the surface stays in the dependency-failure state with a manual retry control.
+- No unbounded polling: refresh is driven by the existing dashboard refresh cadence and user-initiated retry.
+
+### Observability & Diagnostics
+
+- Structured client errors are emitted for validation failures, authorization failures, and exhausted retries, including pool id and error code (no secrets or PII).
+- Stale-data renders emit a diagnostic event so operational dashboards can track how often lenders see stale health.
+
+### Compatibility
+
+- No backend contract or schema changes: the surfaces consume existing pool health and governance endpoints as-is.
+- Unknown `riskFactor.code` values degrade gracefully to API-provided copy, preserving forward compatibility with new backend factors.
+- Persisted lender data and existing API consumers are unaffected.
+
+---
+
 ## Design Goals for Future Iterations
 
 - Historical yield export (CSV / PDF)
