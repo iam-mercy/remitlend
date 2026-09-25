@@ -162,9 +162,63 @@ Every health/risk surface implements these explicit states:
 
 ---
 
+## Lender Yield Export with Data Provenance
+
+This section defines the frontend **lender yield export** surface. It lets a lender export their historical yield as CSV (and PDF where supported) while attaching verifiable provenance so every exported figure can be traced back to its authoritative source. All financial values are read from existing authoritative sources — the yield/positions API and on-chain data — and are never recomputed client-side.
+
+### Data Sources & Authority
+
+- **Yield rows** come from the existing lender yield/positions API (the same source that feeds the Total Yield chart and Position Monitoring table). The export renders these values verbatim; it does not recompute accrued yield, APR, or balances.
+- **Provenance** is assembled from source metadata already returned by those endpoints plus chain references where available:
+  - `sourceId` — the authoritative endpoint/collection the row was read from (e.g. `positions`, `yield-history`).
+  - `retrievedAt` — the client timestamp when the export snapshot was fetched.
+  - `asOf` — the API-provided data timestamp for the row (authoritative freshness), distinct from `retrievedAt`.
+  - `chainId` / `blockNumber` / `txHash` — chain/block references when the source provides them; omitted (not fabricated) when unavailable.
+  - `method` — the calculation method label reported by the source (e.g. `accrued-yield-v1`); the frontend echoes it and never substitutes its own formula.
+- **Staleness** is judged from the API-provided `asOf` compared against the client clock, consistent with the health/risk surfaces; the export never infers freshness from fetch time alone.
+
+### Export Surface
+
+- An **Export Yield** action on the Position Monitoring table and the Total Yield chart header.
+- Format selector: **CSV** (always available) and **PDF** (only when the PDF renderer is available; otherwise the option is disabled with an explanatory tooltip).
+- Scope selector: current timeframe (1D / 1W / 1M) or full history, bounded to the API's supported range.
+- A **provenance header** is prepended to every export containing: export id, generated-at timestamp, lender id, requested scope/timeframe, source identifiers, and the calculation method label(s) used.
+- Each data row carries its own `asOf`, `sourceId`, and chain reference columns so provenance travels with the data, not just the header.
+
+### State Handling
+
+| State | Trigger | UI Behavior |
+|---|---|---|
+| Loading | Export snapshot fetch in flight | Disable the action, show progress; no partial file emitted |
+| Success | Fresh data (`asOf` within freshness window) | Download file with provenance header and per-row provenance |
+| Stale | `asOf` older than freshness window | Warn that data is stale, show as-of time, and require explicit confirmation before export; mark rows stale in the file |
+| Authorization failure | 401/403 from API | Show "Sign in to export your yield" / "You don't have access to this data"; emit no file |
+| Dependency failure | 5xx / network error | Show retry affordance with bounded exponential backoff; never emit a partial or empty file |
+| Empty | No yield rows in scope | Neutral "No yield to export for this period" state; do not emit an empty file |
+
+### Validation & Bounded Behavior
+
+- The export payload is validated against the expected shape before serialization; malformed rows cause the export to fail into the dependency-failure state rather than emitting partial or NaN values.
+- Export scope is bounded to the API's supported range and a maximum row count; larger requests are rejected with a clear message rather than truncated silently.
+- Retries use bounded exponential backoff with a maximum attempt count; after exhaustion the surface stays in the dependency-failure state with a manual retry control.
+- CSV values are escaped per RFC 4180 to prevent formula/CSV injection from any source-provided string fields.
+
+### Observability & Diagnostics
+
+- Structured client events are emitted for export start, success, validation failure, authorization failure, and exhausted retries, including lender id, scope, format, and error code (no secrets or PII).
+- Stale-data exports emit a diagnostic event so operational dashboards can track how often lenders export stale yield.
+- Each export carries a generated `exportId` in both the provenance header and the diagnostic event for audit correlation.
+
+### Compatibility
+
+- No backend contract or schema changes: the export consumes existing yield/positions endpoints as-is.
+- Unknown or missing provenance fields degrade gracefully — the column is omitted or marked `unavailable` rather than fabricated.
+- Persisted lender data and existing API consumers are unaffected.
+
+---
+
 ## Design Goals for Future Iterations
 
-- Historical yield export (CSV / PDF)
 - Multi-pool rebalancing flow
 - Notification alerts for pool health drops
 - Mobile-optimized position monitoring view
