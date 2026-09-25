@@ -39,3 +39,6 @@ jobs:
 
       - name: Run accessibility snapshots
         run: npx playwright test e2e/a11y.spec.ts --project=chromium
+
+      - name: Run chart accessibility tests
+        run: npx playwright test e2e/charts-a11y.spec.ts --project=chromium
