@@ -140,7 +140,6 @@ Every position row carries explicit consistency markers so lenders can judge dat
 
 ## Design Goals for Future Iterations
 
-- Historical yield export (CSV / PDF)
 - Multi-pool rebalancing flow
 - Notification alerts for pool health drops
 - Mobile-optimized position monitoring view

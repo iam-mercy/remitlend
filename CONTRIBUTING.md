@@ -145,6 +145,22 @@ technologies, so accessibility is a correctness requirement, not a nice-to-have.
   `components/ui/Modal`, etc.) rather than re-implementing focus traps and ARIA
   wiring.
 
+**Charts and data visualisations:**
+
+- Every chart must ship an accessible data table that exposes the same values as
+  the visualisation. Render it with the shared `ChartDataTable` primitive
+  (`components/charts/ChartDataTable`) so the table is visually hidden by default
+  but remains in the accessibility tree, and is reachable via a visible
+  "View as table" toggle.
+- Chart elements (bars, points, slices, legend entries) must be keyboard
+  navigable: focusable with `Tab`, traversable with the arrow keys, and
+  activatable with `Enter`/`Space` where the element has an action. Announce the
+  focused datum through an `aria-live` region or `aria-describedby`.
+- Bound the rendered table: cap rows at the shared `MAX_CHART_TABLE_ROWS` limit
+  and paginate or virtualise beyond it so large datasets cannot exhaust the DOM.
+- Add a focused test for each chart covering the table contents, keyboard
+  traversal, and the row cap.
+
 **Automated checks:**
 
 - The **Accessibility** GitHub Actions workflow (`.github/workflows/a11y.yml`)
