@@ -102,118 +102,39 @@ Integrated the **RemitLend Quests** sidebar to tie financial actions directly to
 
 ---
 
-## Pool Health & Risk Explanation Surfaces
+## Lender Position Monitoring with Consistency Markers
 
-This section defines the frontend surfaces that communicate pool health and explain risk to lenders. All values are derived from authoritative sources — the pool API and on-chain governance data — never computed or guessed client-side.
+### Position Metrics
 
-### Data Sources & Authority
+Each lender position surfaces the following metrics, all derived from authoritative chain/API sources (never client-side estimates):
 
-- **Pool health score, utilization, and risk tier** come from the pool API response (`GET /pools/:id/health`) and citadel governance data. The frontend renders these values verbatim; it does not recompute scores, utilization, or tiers.
-- **Risk explanations** are sourced from the API's `riskFactors[]` array (each with `code`, `severity`, `label`, `detail`). The UI maps known `code` values to display copy and falls back to the API-provided `label`/`detail` for unknown codes, so new backend factors render without a frontend release.
-- **Staleness** is determined from the API-provided `asOf` timestamp compared against the client clock; the UI never infers freshness from fetch time alone.
+- **Supplied** — principal deployed into the pool, read from the pool contract
+- **Borrowed** — outstanding principal drawn against the pool
+- **Utilization** — `borrowed / supplied`, computed from the same authoritative snapshot
+- **Accrued Interest** — interest earned to date, sourced from the indexer/API accrual endpoint
 
-### Pool Health Surface
+### Consistency Markers
 
-Displayed on each Prime Lending Pool card and in the pool detail view:
+Every position row carries explicit consistency markers so lenders can judge data trustworthiness at a glance:
 
-- **Health score** — numeric score with a labeled band (Healthy / Watch / At Risk) derived from API-provided thresholds, not hardcoded cutoffs.
-- **Utilization bar** — percentage label rendered directly from the API value.
-- **Risk tier badge** — Low / Medium / High, colored per the palette (teal / amber / red).
-- **As-of timestamp** — shown next to the score so lenders can judge freshness.
+- **Data source** — which authoritative origin produced the row (`chain` or `api`)
+- **Last-updated timestamp** — when the snapshot was captured, rendered in the lender's locale
+- **Staleness indicator** — a badge that flips to *Stale* once the snapshot exceeds the freshness threshold
+- **Sync / retry state** — `synced`, `syncing`, `retrying`, or `failed`, with the attempt count when retrying
 
-### Risk Explanation Surface
+### Authorization, Failure, and Retry Behavior
 
-A collapsible **"Why this risk level?"** panel on each pool card and detail view:
+- **Authorization** — position data is only fetched and rendered for the authenticated lender; unauthorized responses render an explicit access-denied state rather than empty metrics
+- **Failure** — dependency failures (chain RPC, indexer/API) render a structured error with the failing source and a retry affordance; metrics are never silently zeroed
+- **Retry** — transient failures retry with bounded exponential backoff and a capped attempt count; the retry state is reflected in the sync marker
+- **Stale data** — when a refresh fails but a prior snapshot exists, the last-known values remain visible and are clearly marked stale with their original timestamp
+- **Dependency failure** — a failed dependency degrades only the affected marker; unaffected metrics keep their last authoritative values
 
-- Lists each `riskFactor` with its severity indicator and human-readable explanation.
-- Groups factors by severity (High → Medium → Low) for quick scanning.
-- Shows an explicit empty state ("No active risk factors reported") when the API returns none.
-- Links each factor to its authoritative source label (e.g. governance, utilization, oracle) so lenders can trace the claim.
+### Observability
 
-### State Handling
-
-Every health/risk surface implements these explicit states:
-
-| State | Trigger | UI Behavior |
-|---|---|---|
-| Loading | Initial fetch in flight | Skeleton placeholders; no stale numbers shown |
-| Success | Fresh data (`asOf` within freshness window) | Render score, tier, and factors |
-| Stale | `asOf` older than freshness window | Render last-known values with a "Stale" badge and as-of time; disable deposit CTA until refreshed |
-| Authorization failure | 401/403 from API | Show "Sign in to view pool health" / "You don't have access to this pool"; do not render partial data |
-| Dependency failure | 5xx / network error | Show retry affordance with bounded exponential backoff; preserve last-known values marked stale |
-| Empty | Pool has no health data | Neutral "Health data unavailable" state; never fabricate a score |
-
-### Validation & Bounded Behavior
-
-- Health/risk payloads are validated against the expected shape before render; malformed payloads fall back to the dependency-failure state rather than rendering partial or NaN values.
-- Retries use bounded exponential backoff with a maximum attempt count; after exhaustion the surface stays in the dependency-failure state with a manual retry control.
-- No unbounded polling: refresh is driven by the existing dashboard refresh cadence and user-initiated retry.
-
-### Observability & Diagnostics
-
-- Structured client errors are emitted for validation failures, authorization failures, and exhausted retries, including pool id and error code (no secrets or PII).
-- Stale-data renders emit a diagnostic event so operational dashboards can track how often lenders see stale health.
-
-### Compatibility
-
-- No backend contract or schema changes: the surfaces consume existing pool health and governance endpoints as-is.
-- Unknown `riskFactor.code` values degrade gracefully to API-provided copy, preserving forward compatibility with new backend factors.
-- Persisted lender data and existing API consumers are unaffected.
-
----
-
-## Lender Yield Export with Data Provenance
-
-This section defines the frontend **lender yield export** surface. It lets a lender export their historical yield as CSV (and PDF where supported) while attaching verifiable provenance so every exported figure can be traced back to its authoritative source. All financial values are read from existing authoritative sources — the yield/positions API and on-chain data — and are never recomputed client-side.
-
-### Data Sources & Authority
-
-- **Yield rows** come from the existing lender yield/positions API (the same source that feeds the Total Yield chart and Position Monitoring table). The export renders these values verbatim; it does not recompute accrued yield, APR, or balances.
-- **Provenance** is assembled from source metadata already returned by those endpoints plus chain references where available:
-  - `sourceId` — the authoritative endpoint/collection the row was read from (e.g. `positions`, `yield-history`).
-  - `retrievedAt` — the client timestamp when the export snapshot was fetched.
-  - `asOf` — the API-provided data timestamp for the row (authoritative freshness), distinct from `retrievedAt`.
-  - `chainId` / `blockNumber` / `txHash` — chain/block references when the source provides them; omitted (not fabricated) when unavailable.
-  - `method` — the calculation method label reported by the source (e.g. `accrued-yield-v1`); the frontend echoes it and never substitutes its own formula.
-- **Staleness** is judged from the API-provided `asOf` compared against the client clock, consistent with the health/risk surfaces; the export never infers freshness from fetch time alone.
-
-### Export Surface
-
-- An **Export Yield** action on the Position Monitoring table and the Total Yield chart header.
-- Format selector: **CSV** (always available) and **PDF** (only when the PDF renderer is available; otherwise the option is disabled with an explanatory tooltip).
-- Scope selector: current timeframe (1D / 1W / 1M) or full history, bounded to the API's supported range.
-- A **provenance header** is prepended to every export containing: export id, generated-at timestamp, lender id, requested scope/timeframe, source identifiers, and the calculation method label(s) used.
-- Each data row carries its own `asOf`, `sourceId`, and chain reference columns so provenance travels with the data, not just the header.
-
-### State Handling
-
-| State | Trigger | UI Behavior |
-|---|---|---|
-| Loading | Export snapshot fetch in flight | Disable the action, show progress; no partial file emitted |
-| Success | Fresh data (`asOf` within freshness window) | Download file with provenance header and per-row provenance |
-| Stale | `asOf` older than freshness window | Warn that data is stale, show as-of time, and require explicit confirmation before export; mark rows stale in the file |
-| Authorization failure | 401/403 from API | Show "Sign in to export your yield" / "You don't have access to this data"; emit no file |
-| Dependency failure | 5xx / network error | Show retry affordance with bounded exponential backoff; never emit a partial or empty file |
-| Empty | No yield rows in scope | Neutral "No yield to export for this period" state; do not emit an empty file |
-
-### Validation & Bounded Behavior
-
-- The export payload is validated against the expected shape before serialization; malformed rows cause the export to fail into the dependency-failure state rather than emitting partial or NaN values.
-- Export scope is bounded to the API's supported range and a maximum row count; larger requests are rejected with a clear message rather than truncated silently.
-- Retries use bounded exponential backoff with a maximum attempt count; after exhaustion the surface stays in the dependency-failure state with a manual retry control.
-- CSV values are escaped per RFC 4180 to prevent formula/CSV injection from any source-provided string fields.
-
-### Observability & Diagnostics
-
-- Structured client events are emitted for export start, success, validation failure, authorization failure, and exhausted retries, including lender id, scope, format, and error code (no secrets or PII).
-- Stale-data exports emit a diagnostic event so operational dashboards can track how often lenders export stale yield.
-- Each export carries a generated `exportId` in both the provenance header and the diagnostic event for audit correlation.
-
-### Compatibility
-
-- No backend contract or schema changes: the export consumes existing yield/positions endpoints as-is.
-- Unknown or missing provenance fields degrade gracefully — the column is omitted or marked `unavailable` rather than fabricated.
-- Persisted lender data and existing API consumers are unaffected.
+- Structured errors carry the position id, data source, and failure class
+- Sync/retry transitions emit audit events for operational diagnostics
+- Metrics track fetch latency, staleness duration, and retry counts per position
 
 ---
 
