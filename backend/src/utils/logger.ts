@@ -1,5 +1,6 @@
 import winston from 'winston';
-import { getRequestId } from './requestContext.js';
+import { getRequestId, getTraceContext, getTraceId } from './requestContext.js';
+import { formatTraceparent } from './traceContext.js';
 
 const levels = {
   error: 0,
@@ -104,11 +105,22 @@ const productionFormat = winston.format.combine(
   winston.format.json(),
 );
 
-const withRequestId = winston.format((info) => {
+const withCorrelationContext = winston.format((info) => {
   const requestIdFromContext = getRequestId();
   if (requestIdFromContext && !info.requestId) {
     info.requestId = requestIdFromContext;
   }
+
+  // Every log line emitted inside a traced unit of work (inbound request,
+  // indexer pass, chain confirmation) carries the W3C trace fields so operators
+  // can correlate one wallet action across API, indexer, and chain hops.
+  const trace = getTraceContext();
+  if (trace) {
+    if (!info.traceId) info.traceId = trace.traceId;
+    if (!info.spanId) info.spanId = trace.spanId;
+    if (!info.traceparent) info.traceparent = formatTraceparent(trace);
+  }
+
   return info;
 });
 
@@ -117,8 +129,8 @@ const isProduction = process.env.NODE_ENV === 'production';
 const transports: winston.transport[] = [
   new winston.transports.Console({
     format: isProduction
-      ? winston.format.combine(withRequestId(), productionFormat)
-      : winston.format.combine(withRequestId(), devFormat),
+      ? winston.format.combine(withCorrelationContext(), productionFormat)
+      : winston.format.combine(withCorrelationContext(), devFormat),
   }),
 ];
 
@@ -145,7 +157,9 @@ const shouldSample = (sampleRate: number = 0.1): boolean => {
 
 const withContext = (context: LogContext = {}) => {
   const requestId = context.requestId || getRequestId();
-  const traceId = context.traceId || context.requestId || getRequestId();
+  // A traceId supplied explicitly (e.g. a chain-confirmation span) wins;
+  // otherwise inherit the ambient trace so nested logs stay on one trace.
+  const traceId = context.traceId || getTraceId() || requestId;
   const baseMeta: Record<string, any> = {};
 
   if (requestId) baseMeta.requestId = requestId;
