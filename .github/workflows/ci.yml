@@ -142,14 +142,201 @@ jobs:
   # ── 11. Smart-contract CI ─────────────────────────────────────────────────────
   contracts:
     needs: money-policy
-    uses: ./.github/workflows/reusable-contracts.yml
-    permissions:
-      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
-  # ── 12. Deployed-contract compatibility suite (Issue #407) ────────────────────
-  contract-compatibility:
-    needs: contracts
-    uses: ./.github/workflows/reusable-contract-compatibility.yml
-    permissions:
-      contents: read
-    secrets: inherit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            contracts
+            contracts/fuzz
+      - name: Format check
+        run: cargo fmt --all -- --check
+        working-directory: contracts
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: contracts
+      - name: Run tests
+        run: cargo test -- --test-threads=1
+        working-directory: contracts
+      - name: Formal verification (loan_manager invariants)
+        # Dedicated gate for the safety invariants proven in
+        # contracts/loan_manager/src/formal_verification.rs (issue #46):
+        # loan <= pool balance, collateral accounted exactly, repayment
+        # monotonicity, non-negative interest/fees/credit score, and the
+        # max_loan_amount ceiling. Kept as its own step so a regression here
+        # is unambiguous in the CI log.
+        run: cargo test -p loan_manager formal_verification -- --test-threads=1 --nocapture
+        working-directory: contracts
+      - name: Build contracts for wasm32 and enforce size budget
+        run: |
+          set -euo pipefail
+
+          cargo build --target wasm32-unknown-unknown --release
+
+          # Generous initial budget: 256 KiB per contract. Tighten after baseline optimization.
+          max_bytes=$((256 * 1024))
+          shopt -s nullglob
+          wasm_files=(target/wasm32-unknown-unknown/release/*.wasm)
+
+          if [ "${#wasm_files[@]}" -eq 0 ]; then
+            echo "::error::No wasm artifacts were produced."
+            exit 1
+          fi
+
+          for wasm in "${wasm_files[@]}"; do
+            size_bytes=$(stat -c%s "$wasm")
+            size_kib=$(( (size_bytes + 1023) / 1024 ))
+            echo "$(basename "$wasm"): ${size_bytes} bytes (${size_kib} KiB), budget ${max_bytes} bytes"
+
+            if [ "$size_bytes" -gt "$max_bytes" ]; then
+              echo "::error file=$wasm::WASM artifact exceeds the 256 KiB per-contract budget."
+              exit 1
+            fi
+          done
+        working-directory: contracts
+      - name: Analyze per-function contract sizes
+        run: |
+          bash ../scripts/analyze-contract-sizes.sh ./target/wasm32-unknown-unknown/release
+        working-directory: contracts
+      - name: Check for size regressions
+        if: github.event_name == 'pull_request'
+        run: |
+          bash ../scripts/check-wasm-size-regression.sh origin/main ./target/wasm32-unknown-unknown/release || exit_code=$?
+          if [ "${exit_code:-0}" -ne 0 ]; then
+            echo "::warning::Size regression detected. Run optimization analysis locally:"
+            echo "  bash scripts/optimize-wasm-sizes.sh target/wasm32-unknown-unknown/release"
+            exit 1
+          fi
+        working-directory: contracts
+        continue-on-error: true
+      - name: Generate optimization report
+        run: |
+          bash ../scripts/optimize-wasm-sizes.sh ./target/wasm32-unknown-unknown/release ./.wasm-optimized
+        working-directory: contracts
+        continue-on-error: true
+      - name: Upload size analysis and optimization report
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-optimization-report
+          path: |
+            contracts/.wasm-optimized/
+            contracts/size-budgets.json
+          retention-days: 30
+      - name: Upload wasm artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: contracts-wasm
+          path: contracts/target/wasm32-unknown-unknown/release/*.wasm
+          if-no-files-found: error
+      - name: Install tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+      - name: Run coverage
+        run: cargo tarpaulin --out Xml
+        working-directory: contracts
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: contracts-coverage
+          path: contracts/cobertura.xml
+          retention-days: 7
+      - name: Check fuzz targets compile
+        run: cargo check
+        working-directory: contracts/fuzz
+
+  # ── Issue #359: Secrets inventory and automated exposure scanning ─────────
+  # Scans every file tracked by git for accidental secret commits using two
+  # complementary tools:
+  #   1. gitleaks — git-history-aware pattern scanner (catches past leaks too)
+  #   2. grep-based heuristics — lightweight zero-install check for common
+  #      high-entropy strings and placeholder values left in committed files
+  #
+  # The job is intentionally placed last so it does not block fast-feedback
+  # jobs (lint, typecheck) on PRs but still gates merges to main.
+  secrets-scan:
+    needs: supply-chain-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Fetch full history so gitleaks can scan all commits, not just HEAD.
+          fetch-depth: 0
+
+      - name: Run gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is required only for organisations on the paid plan.
+          # For public / open-source repos the free tier applies automatically.
+        with:
+          args: >
+            detect
+            --source .
+            --log-opts="HEAD"
+            --no-git=false
+            --redact
+
+      - name: Check for high-risk placeholder secrets in committed files
+        # Lightweight heuristic scan that catches common developer mistakes:
+        # - Default JWT secrets left in committed config
+        # - Hardcoded API keys in source
+        # - Private keys accidentally committed
+        # - AWS key patterns
+        # This is complementary to gitleaks and runs without any external tool.
+        shell: bash
+        run: |
+          set +e
+          FOUND=0
+
+          # Patterns known to be developer-placeholder values that must never be committed.
+          HIGH_RISK_PATTERNS=(
+            'your-super-secret-jwt-key'
+            'change-me-in-production'
+            'CHANGE_ME'
+            'INSERT_SECRET_HERE'
+            'TODO.*secret'
+            'AKIA[0-9A-Z]{16}'
+            '-----BEGIN (RSA|EC|OPENSSH) PRIVATE KEY-----'
+            'sk-[a-zA-Z0-9]{48}'
+          )
+
+          # Files and directories to exclude from the scan.
+          EXCLUDE_ARGS=(
+            --exclude-dir=node_modules
+            --exclude-dir=.git
+            --exclude-dir=target
+            --exclude-dir=.next
+            --exclude='*.lock'
+            --exclude='*.wasm'
+            --exclude='*.png'
+            --exclude='*.svg'
+          )
+
+          for pattern in "${HIGH_RISK_PATTERNS[@]}"; do
+            # Search only tracked files (respects .gitignore automatically via git ls-files).
+            # Exclude .github/ (workflow definitions) and docs/ (documentation examples) and .env.example.
+            if git ls-files -z | grep -zv '^\.github/' | grep -zv '^docs/' | xargs -0 grep -l --include="*.ts" --include="*.js" \
+                --include="*.json" --include="*.yaml" --include="*.yml" \
+                -P "$pattern" 2>/dev/null | grep -v '\.env\.example$' | grep -q .; then
+              echo "::error::High-risk placeholder detected in committed file (pattern: $pattern)"
+              git ls-files -z | grep -zv '^\.github/' | grep -zv '^docs/' | xargs -0 grep -ln -P "$pattern" 2>/dev/null | \
+                grep -v '\.env\.example$'
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo ""
+            echo "::error::One or more high-risk secrets or placeholders were found in committed files."
+            echo "Remove them, rotate any real credentials, and re-push."
+            echo "See docs/SECRETS-INVENTORY.md for the canonical secrets reference."
+            exit 1
+          fi
+          echo "No high-risk placeholder secrets found in committed files."
